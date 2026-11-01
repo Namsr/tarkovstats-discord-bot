@@ -12,8 +12,11 @@ function safeError(error) {
 
 export async function runDiscordBot({ env = process.env, logger = console } = {}) {
   const config = loadDiscordBotConfig(env);
-  const { Client, GatewayIntentBits } = await import("discord.js");
-  const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+  const { Client, GatewayIntentBits, Partials } = await import("discord.js");
+  const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+    partials: [Partials.Message],
+  });
   const store = new DiscordJobStore(config.statePath);
   const worker = new DiscordBotWorker({ config, client, store, logger });
   let started = false;
