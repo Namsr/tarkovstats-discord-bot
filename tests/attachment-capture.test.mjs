@@ -42,6 +42,7 @@ async function fixture() {
       f.captures.push(body);
       if (f.uploadGate) await f.uploadGate.promise;
       if (f.captureError) throw f.captureError;
+      if (f.captureStatus) return Response.json({ error: f.captureCode }, { status: f.captureStatus });
       if (f.captureResponse) return Response.json(f.captureResponse);
       return Response.json({ ok: true, captured: true, matchNumber: 5892, photo: { revision: "a".repeat(64), width: 1, height: 1 } });
     }
@@ -267,5 +268,51 @@ test("a mismatched CDN attachment ID is rejected before enqueue or download", as
     await assert.rejects(() => f.worker.handleMessage(message), /attachment_source_mismatch/);
     assert.equal(f.downloads.length, 0);
     assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM discord_jobs").get().n, 0);
+  } finally { await f.cleanup(); }
+});
+
+
+test("a definitive non-scoreboard rejection deletes local bytes and does not enter OCR", async () => {
+  const f = await fixture();
+  try {
+    f.captureStatus = 422; f.captureCode = "not_scoreboard";
+    await f.accept(); await f.drain();
+    const job = f.store.claimDue(f.now);
+    assert.ok(job);
+    assert.equal(f.store.readCapturePhoto(job), null);
+    assert.equal(f.store.getCapture(job).uploaded_at, null);
+    assert.equal(f.store.getCapture(job).stage, "failed");
+    await f.worker.processJob(job);
+    assert.equal(f.ocr.length, 0);
+    assert.match(f.replies[0].content, /итоговая таблица результатов не обнаружена/);
+    assert.equal(f.store.get(job).status, "done");
+    await f.reopen(); f.worker.kickCaptures(); await f.drain();
+    assert.equal(f.downloads.length, 1, "rejected attachments must not be downloaded again");
+  } finally { await f.cleanup(); }
+});
+
+test("other rejection types do not delete the last local copy", async () => {
+  const f = await fixture();
+  try {
+    f.captureStatus = 422; f.captureCode = "screenshot_match_mismatch";
+    await f.accept(); await f.drain();
+    const job = f.store.claimDue(f.now);
+    assert.ok(job);
+    assert.equal(f.store.readCapturePhoto(job).bytes, 3);
+    assert.equal(f.ocr.length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test("reject cleanup is atomic if storing the failure response fails", async () => {
+  const f = await fixture();
+  try {
+    f.worker.kickCaptures = () => {};
+    await f.accept();
+    const capture = f.store.claimCaptureDownload(f.now);
+    f.store.saveCapturePhoto(capture, { data: "AQID", bytes: 3, contentType: "image/png" }, f.now);
+    f.store.db.exec("CREATE TRIGGER reject_failure BEFORE UPDATE OF response_json ON discord_jobs BEGIN SELECT RAISE(ABORT, 'forced response failure'); END");
+    assert.throws(() => f.store.rejectCapture(capture, new Error("not_scoreboard"), f.now), /forced response failure/);
+    assert.equal(f.store.readCapturePhoto(capture).bytes, 3);
+    assert.equal(f.store.getCapture(capture).stage, "downloaded");
   } finally { await f.cleanup(); }
 });
