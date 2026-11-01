@@ -1,0 +1,13 @@
+node_modules/
+data/
+.env*
+*.db
+*.db-shm
+*.db-wal
+coverage/
+AGENTS.md
+AGENTS.override.md
+.agents/
+.codex/
+.codex-local/
+*.log

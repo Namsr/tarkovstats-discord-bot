@@ -1,0 +1,15 @@
+{
+  "name": "tarkovstats-discord-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AXIS match screenshot delivery worker for TarkovStats",
+  "engines": { "node": ">=22.18.0" },
+  "scripts": {
+    "start": "node --experimental-sqlite scripts/axis-discord-bot.mjs",
+    "i18n:check": "node scripts/check-i18n.mjs",
+    "test": "node --experimental-sqlite --test tests/*.test.mjs",
+    "smoke": "node --experimental-sqlite scripts/smoke.mjs"
+  },
+  "dependencies": { "discord.js": "14.27.0" }
+}

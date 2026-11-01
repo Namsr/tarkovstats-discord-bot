@@ -1,0 +1,30 @@
+# Overlay for the existing TarkovStats VPS only. Never start a second worker
+# while the legacy axis-discord service is running against this volume.
+services:
+  bot:
+    cgroup_parent: tarkovstats-background.slice
+    cpus: 0.5
+    cpu_shares: 128
+    mem_limit: 512m
+    memswap_limit: 768m
+    pids_limit: 128
+    environment:
+      AXIS_DISCORD_API_BASE_URL: http://web:3000
+    networks:
+      - tarkovstats
+    logging:
+      driver: journald
+      options:
+        tag: tarkovstats-axis-discord
+        mode: non-blocking
+        max-buffer-size: 1m
+
+volumes:
+  bot_data:
+    external: true
+    name: tarkovstats_axis_discord_data
+
+networks:
+  tarkovstats:
+    external: true
+    name: tarkovstats_default
