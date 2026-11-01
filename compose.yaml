@@ -1,0 +1,22 @@
+services:
+  bot:
+    build: .
+    image: tarkovstats-discord-bot:local
+    env_file: .env.discord
+    environment:
+      AXIS_DISCORD_STATE_PATH: /data/axis-discord.db
+    restart: unless-stopped
+    stop_grace_period: 60s
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    volumes:
+      - bot_data:/data
+
+volumes:
+  bot_data:

@@ -1,0 +1,26 @@
+name: CI
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.3'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run i18n:check
+      - run: npm test
+      - run: npm run smoke
+      - run: docker build -t discord-bot:test .
+      - name: Test isolated production runtime
+        run: >-
+          docker run --rm --network none --read-only
+          --tmpfs /tmp:rw,noexec,nosuid,size=32m
+          discord-bot:test node --experimental-sqlite scripts/smoke.mjs
