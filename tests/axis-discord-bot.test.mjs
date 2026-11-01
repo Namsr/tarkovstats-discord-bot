@@ -75,7 +75,7 @@ test("new match channels and newly created threads get one durable reminder", as
     client.emit("threadCreate", channel, true);
     await worker.processMatchReminder(store.claimReminderDue());
     assert.equal(sent.length, 1);
-    assert.match(sent[0].content, /Перед выбором победителя.*скриншот/);
+    assert.match(sent[0].content, /Перед тем, как выбрать победителя.*скриншот/);
     assert.deepEqual(sent[0].allowedMentions, { parse: [] });
     assert.equal(sent[0].enforceNonce, true);
     await worker.stop();
