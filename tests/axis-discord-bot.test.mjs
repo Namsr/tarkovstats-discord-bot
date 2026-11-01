@@ -8,7 +8,7 @@ import { loadDiscordBotConfig } from "../lib/discord-bot/config.mjs";
 import { DiscordJobStore } from "../lib/discord-bot/state.mjs";
 import { DiscordBotWorker } from "../lib/discord-bot/worker.mjs";
 import { downloadAttachment, isAllowedMessage, MAX_BYTES, resolveMatchNumber, validateAttachmentUrl } from "../lib/discord-bot/security.mjs";
-import { resultMessage } from "../lib/discord-bot/messages.mjs";
+import { messageText, resultMessage } from "../lib/discord-bot/messages.mjs";
 
 const ENV = {
   DISCORD_TOKEN: "A".repeat(60), AXIS_DISCORD_SECRET: "S".repeat(40), AXIS_DISCORD_GUILD_ID: "100000000000000001",
@@ -254,7 +254,7 @@ test("a full attachment batch does not advance its checkpoint", async () => {
   }
 });
 
-test("worker captures the event attachment, submits it and replies once", async () => {
+test("worker sends two progress notices and exactly one final result", async () => {
   const directory = await mkdtemp(join(tmpdir(), "axis-discord-worker-"));
   let store;
   try {
@@ -281,11 +281,13 @@ test("worker captures the event attachment, submits it and replies once", async 
     await drainCaptures(worker);
     const job = store.claimDue();
     await worker.processJob(job);
-    assert.equal(replies.length, 1);
-    assert.match(replies[0].content, /80%/);
+    assert.equal(replies.length, 3);
+    assert.equal(replies[0].content, messageText(config.language, "downloading"));
+    assert.equal(replies[1].content, messageText(config.language, "downloaded"));
+    assert.match(replies[2].content, /80%/);
     assert.equal(store.get(job).status, "done");
     await worker.processJob(job);
-    assert.equal(replies.length, 1);
+    assert.equal(replies.length, 3);
   } finally {
     closeStore(store);
     await removeDirectory(directory);
@@ -461,10 +463,11 @@ test("distinct multi-image replies are not suppressed by history entries without
     assert.equal(await worker.handleMessage(sourceMessage), 2);
     await drainCaptures(worker);
     for (let job = store.claimDue(); job; job = store.claimDue()) await worker.processJob(job);
-    assert.equal(replies.length, 2);
-    assert.match(replies[0].content, /80%/);
-    assert.match(replies[1].content, /100%/);
-    assert.equal(await worker.findExistingAck(channel, sourceMessage.id, "nonce-not-present", replies[0].content), true);
+    const results = replies.filter(({ content }) => content.includes("K/D/A"));
+    assert.equal(results.length, 2);
+    assert.match(results[0].content, /80%/);
+    assert.match(results[1].content, /100%/);
+    assert.equal(await worker.findExistingAck(channel, sourceMessage.id, "nonce-not-present", results[0].content), true);
   } finally {
     closeStore(store);
     await removeDirectory(directory);
