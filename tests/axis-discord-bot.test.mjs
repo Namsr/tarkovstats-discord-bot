@@ -19,6 +19,14 @@ function closeStore(store) {
   try { store?.close(); } catch { /* cleanup must not replace the test assertion */ }
 }
 
+async function drainCaptures(worker) {
+  while (worker.downloadTasks.size || worker.uploadTasks.size) await Promise.all([...worker.downloadTasks, ...worker.uploadTasks]);
+}
+
+function capturedResponse() {
+  return new Response(JSON.stringify({ ok: true, captured: true, matchNumber: 42, photo: { revision: "a".repeat(64), width: 1, height: 1 } }), { headers: { "content-type": "application/json" } });
+}
+
 async function removeDirectory(directory) {
   try { await rm(directory, { recursive: true, force: true }); }
   catch { /* a cleanup failure must not mask the test assertion */ }
@@ -67,7 +75,7 @@ test("new match channels and newly created threads get one durable reminder", as
     client.emit("threadCreate", channel, true);
     await worker.processMatchReminder(store.claimReminderDue());
     assert.equal(sent.length, 1);
-    assert.match(sent[0].content, /Перед выбором победителя.*скриншот/);
+    assert.match(sent[0].content, /Перед тем, как выбрать победителя.*скриншот/);
     assert.deepEqual(sent[0].allowedMentions, { parse: [] });
     assert.equal(sent[0].enforceNonce, true);
     await worker.stop();
@@ -246,7 +254,7 @@ test("a full attachment batch does not advance its checkpoint", async () => {
   }
 });
 
-test("worker reads a fresh attachment URL, submits it and replies once", async () => {
+test("worker captures the event attachment, submits it and replies once", async () => {
   const directory = await mkdtemp(join(tmpdir(), "axis-discord-worker-"));
   let store;
   try {
@@ -262,13 +270,15 @@ test("worker reads a fresh attachment URL, submits it and replies once", async (
     const channel = { id: "200000000000000001", parentId: null, name: "match-42", messages: { fetch: async (arg) => (typeof arg === "string" || arg?.message) ? sourceMessage : new Map() } };
     sourceMessage.channel = channel;
     const client = { user: { id: "900000000000000001" }, channels: { fetch: async () => channel } };
-    const apiFetch = async (url) => {
+    const apiFetch = async (url, options) => {
+      if (options?.body && JSON.parse(options.body).captureOnly) return capturedResponse();
       if (String(url).includes("/api/integrations/")) return new Response(JSON.stringify({ ok: true, matchNumber: 42, recognizedPlayers: 8, totalPlayers: 10, coveragePercent: 80, confidencePercent: 91, needsReview: false }), { status: 200, headers: { "content-type": "application/json" } });
       return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } });
     };
     store = new DiscordJobStore(config.statePath);
     const worker = new DiscordBotWorker({ config, client, store, fetchImpl: apiFetch });
     assert.equal(await worker.handleMessage(sourceMessage), 1);
+    await drainCaptures(worker);
     const job = store.claimDue();
     await worker.processJob(job);
     assert.equal(replies.length, 1);
@@ -392,6 +402,7 @@ test("a later live message cannot advance past an image rejected by a full queue
     const filler = { guildId: config.guildId, channelId: channel.id, parentChannelId: null, messageId: "400000000000000007", attachmentId: "300000000000000007", authorId: "500000000000000001", matchNumber: 42 };
     store.enqueue(filler);
     const worker = new DiscordBotWorker({ config, client, store });
+    worker.kickCaptures = () => {}; // This case isolates queue/checkpoint backpressure.
     await assert.rejects(() => worker.handleMessage(image), /queue_full/);
     await worker.handleMessage(plain);
     assert.equal(store.checkpoint(channel.id), null);
@@ -435,7 +446,8 @@ test("distinct multi-image replies are not suppressed by history entries without
     sourceMessage.channel = channel;
     let submissions = 0;
     const client = { user: { id: "900000000000000001" }, channels: { fetch: async () => channel } };
-    const apiFetch = async (url) => {
+    const apiFetch = async (url, options) => {
+      if (options?.body && JSON.parse(options.body).captureOnly) return capturedResponse();
       if (String(url).includes("/api/integrations/")) {
         submissions += 1;
         const complete = submissions === 2;
@@ -447,6 +459,7 @@ test("distinct multi-image replies are not suppressed by history entries without
     store = new DiscordJobStore(config.statePath);
     const worker = new DiscordBotWorker({ config, client, store, fetchImpl: apiFetch });
     assert.equal(await worker.handleMessage(sourceMessage), 2);
+    await drainCaptures(worker);
     for (let job = store.claimDue(); job; job = store.claimDue()) await worker.processJob(job);
     assert.equal(replies.length, 2);
     assert.match(replies[0].content, /80%/);

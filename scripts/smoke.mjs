@@ -9,7 +9,7 @@ import { messageText } from "../lib/discord-bot/messages.mjs";
 
 assert.equal(typeof runDiscordBot, "function");
 assert.match(messageText("en", "reminder"), /Before choosing/);
-assert.match(messageText("ru", "reminder"), /Перед выбором/);
+assert.match(messageText("ru", "reminder"), /Перед тем, как выбрать победителя/);
 const directory = await mkdtemp(join(tmpdir(), "discord-smoke-"));
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 let store;

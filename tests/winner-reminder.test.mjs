@@ -74,7 +74,7 @@ test("a NeatQueue edit sends a second reminder, with no duplicate after votes or
     assert.equal(f.sent.length, 2);
     assert.notEqual(f.sent[0].nonce, f.sent[1].nonce, "phases must have distinct Discord nonces");
     assert.equal(f.sent[0].content, f.sent[1].content);
-    assert.match(f.sent[1].content, /Перед выбором победителя/);
+    assert.match(f.sent[1].content, /Перед тем, как выбрать победителя/);
     assert.deepEqual(f.sent[1].allowedMentions, { parse: [] });
     assert.equal(f.sent[1].enforceNonce, true);
     f.client.emit("messageUpdate", {}, f.menu);

@@ -3,7 +3,7 @@ import { dict } from "../lib/i18n/dictionary.mjs";
 
 const keys = Object.keys(dict.en).sort();
 assert.deepEqual(Object.keys(dict.ru).sort(), keys);
-for (const key of ["reminder", "accepted", "review", "confidence", "failed", "invalid", "disabled", "missing", "unmatched", "conflicts"]) {
+for (const key of ["reminder", "accepted", "review", "confidence", "failed", "invalid", "disabled", "notScoreboard", "missing", "unmatched", "conflicts"]) {
   assert.ok(keys.includes(`axis.discord.${key}`), `Missing message ${key}`);
 }
 for (const key of keys) {
