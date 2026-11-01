@@ -8,13 +8,14 @@ import { loadDiscordBotConfig } from "../lib/discord-bot/config.mjs";
 import { DiscordJobStore, CAPTURE_STORAGE_LIMIT } from "../lib/discord-bot/state.mjs";
 import { MAX_BYTES } from "../lib/discord-bot/security.mjs";
 import { DiscordBotWorker } from "../lib/discord-bot/worker.mjs";
+import { messageText } from "../lib/discord-bot/messages.mjs";
 
-async function fixture() {
+async function fixture(language = "ru") {
   const directory = await mkdtemp(join(tmpdir(), "attachment-capture-"));
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "T".repeat(60), AXIS_DISCORD_SECRET: "S".repeat(40),
     AXIS_DISCORD_GUILD_ID: "100000000000000001", AXIS_DISCORD_CHANNEL_IDS: "200000000000000001",
-    AXIS_DISCORD_MATCH_PREFIX: "queue-", AXIS_DISCORD_STATE_PATH: join(directory, "state.db") });
-  const f = { config, now: 10000, downloads: [], captures: [], ocr: [], replies: [], rest: 0, gates: [], sourceError: null, captureError: null, ocrStatus: 200 };
+    AXIS_DISCORD_MATCH_PREFIX: "queue-", AXIS_DISCORD_LANG: language, AXIS_DISCORD_STATE_PATH: join(directory, "state.db") });
+  const f = { config, now: 10000, downloads: [], captures: [], ocr: [], replies: [], notices: [], events: [], rest: 0, gates: [], sourceError: null, captureError: null, ocrStatus: 200 };
   f.gate = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); const gate = { promise, resolve }; f.gates.push(gate); return gate; };
   f.channel = { id: "300000000000000001", guildId: config.guildId, parentId: config.channelIds[0], name: "queue-5892" };
   f.message = (n = 1) => {
@@ -22,18 +23,25 @@ async function fixture() {
     return { id, guildId: config.guildId, channelId: f.channel.id, channel: f.channel,
       author: { id: "600000000000000001", bot: false }, attachments: new Map([[attachment,
         { id: attachment, name: "results.png", contentType: "image/png", url: `https://cdn.discordapp.com/attachments/${f.channel.id}/${attachment}/results.png?sig=private` }]]),
-      reply: async (value) => { f.replies.push(value); } };
+      reply: async (value) => {
+        const phase = ["downloading", "downloaded"].find((key) => value.content === messageText(config.language, key));
+        if (phase) {
+          f.notices.push({ ...value, phase });
+          if (f.noticeGate) await f.noticeGate.promise;
+          if (f.noticeError) throw f.noticeError;
+        } else f.replies.push(value);
+      } };
   };
   f.messages = new Map();
   f.channel.messages = { fetch: async (options) => options.message ? f.messages.get(options.message) : new Map() };
   f.client = { user: { id: "700000000000000001" }, channels: { fetch: async () => {
-    f.rest++;
+    f.rest++; f.events.push("discord");
     if (f.sourceError) throw f.sourceError;
     return f.channel;
   } } };
   f.fetch = async (url, options = {}) => {
     if (String(url).startsWith("https://cdn.discordapp.com/")) {
-      f.downloads.push(String(url));
+      f.events.push("download"); f.downloads.push(String(url));
       if (f.downloadGate) await f.downloadGate.promise;
       return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } });
     }
@@ -55,19 +63,20 @@ async function fixture() {
   f.makeWorker = () => new DiscordBotWorker({ config, client: f.client, store: f.store, fetchImpl: f.fetch, logger: { warn() {} }, now: () => f.now });
   f.worker = f.makeWorker();
   f.accept = async (n = 1) => { const message = f.message(n); f.messages.set(message.id, message); await f.worker.handleMessage(message); return message; };
-  f.drain = async () => { while (f.worker.downloadTasks.size || f.worker.uploadTasks.size) await Promise.all([...f.worker.downloadTasks, ...f.worker.uploadTasks]); };
+  f.drainCaptures = async () => { while (f.worker.downloadTasks.size || f.worker.uploadTasks.size) await Promise.all([...f.worker.downloadTasks, ...f.worker.uploadTasks]); };
+  f.drain = async () => { await f.drainCaptures(); await Promise.all([...f.worker.captureNoticeTasks.values()]); };
   f.reopen = async () => { await f.worker.stop(); f.store.close(); f.store = new DiscordJobStore(config.statePath); f.worker = f.makeWorker(); };
   f.cleanup = async () => { for (const gate of f.gates) gate.resolve(); await f.worker.stop(); f.store.close(); await rm(directory, { recursive: true, force: true }); };
   return f;
 }
 
-test("Gateway attachments start downloading without REST, independently of a blocked OCR job", async () => {
+test("Gateway downloads start before Discord REST, independently of a blocked OCR job", async () => {
   const f = await fixture();
   let processing;
   try {
     await f.accept();
     assert.equal(f.downloads.length, 1);
-    assert.equal(f.rest, 0);
+    assert.equal(f.events[0], "download", "downloading must start before any Discord REST operation");
     await f.drain();
     f.ocrGate = f.gate();
     processing = f.worker.processJob(f.store.claimDue(f.now));
@@ -90,7 +99,7 @@ test("deleting the channel after receipt does not prevent capture or OCR of the 
     f.downloadGate.resolve();
     await f.drain();
     assert.equal(f.captures.length, 1);
-    assert.equal(f.rest, 0);
+    assert.equal(f.events[0], "download", "downloading must start before any Discord REST operation");
     const job = f.store.claimDue(f.now);
     await f.worker.processJob(job);
     const saved = f.store.get(job);
@@ -314,5 +323,120 @@ test("reject cleanup is atomic if storing the failure response fails", async () 
     assert.throws(() => f.store.rejectCapture(capture, new Error("not_scoreboard"), f.now), /forced response failure/);
     assert.equal(f.store.readCapturePhoto(capture).bytes, 3);
     assert.equal(f.store.getCapture(capture).stage, "downloaded");
+  } finally { await f.cleanup(); }
+});
+
+
+test("two ordered progress replies bracket the durable download and precede the final result", async () => {
+  const f = await fixture();
+  try {
+    f.downloadGate = f.gate();
+    await f.accept();
+    await setImmediate();
+    assert.deepEqual(f.notices.map((n) => n.phase), ["downloading"]);
+    const job = f.store.db.prepare("SELECT * FROM discord_jobs").get();
+    assert.equal(f.store.readCapturePhoto(job), null);
+    assert.equal(f.store.getCapture(job).downloaded_notice_at, null);
+    f.downloadGate.resolve(); await f.drain();
+    assert.deepEqual(f.notices.map((n) => n.phase), ["downloading", "downloaded"]);
+    assert.equal(f.store.readCapturePhoto(job).bytes, 3);
+    assert.equal(f.store.getCapture(job).downloaded_notice_at, f.now);
+    assert.equal(f.ocr.length, 0);
+    assert.equal(f.replies.length, 0);
+    assert.ok(f.notices.every((n) => n.enforceNonce && n.allowedMentions.parse.length === 0));
+    assert.notEqual(f.notices[0].nonce, f.notices[1].nonce);
+    await f.worker.processJob(f.store.claimDue(f.now));
+    assert.equal(f.replies.length, 1);
+    assert.notEqual(f.replies[0].nonce, f.notices[1].nonce);
+  } finally { await f.cleanup(); }
+});
+
+test("a stalled progress reply never blocks downloads, website retention or later attachments", async () => {
+  const f = await fixture(); let processing;
+  try {
+    f.noticeGate = f.gate();
+    await f.accept(); await f.drainCaptures();
+    assert.equal(f.captures.length, 1);
+    assert.deepEqual(f.notices.map((n) => n.phase), ["downloading"]);
+    processing = f.worker.processJob(f.store.claimDue(f.now));
+    await setImmediate();
+    assert.equal(f.ocr.length, 1);
+    assert.equal(f.replies.length, 0, "the final reply must not overtake progress replies");
+    await f.accept(2); await f.drainCaptures();
+    assert.equal(f.downloads.length, 2);
+    assert.equal(f.captures.length, 2);
+    f.noticeGate.resolve(); await f.drain(); await processing;
+    assert.equal(f.replies.length, 1);
+    assert.equal(f.notices.length, 4);
+  } finally { for (const gate of f.gates) gate.resolve(); await processing; await f.cleanup(); }
+});
+
+test("progress failures preserve captured bytes and do not become download retries", async () => {
+  const f = await fixture();
+  try {
+    f.noticeError = Object.assign(new Error("Missing Permissions"), { status: 403, code: 50013 });
+    await f.accept(); await f.drain();
+    assert.equal(f.downloads.length, 1);
+    assert.equal(f.captures.length, 1);
+    const job = f.store.claimDue(f.now);
+    assert.equal(f.store.readCapturePhoto(job).bytes, 3);
+    f.noticeError = null;
+    await f.worker.processJob(job);
+    assert.equal(f.ocr.length, 1);
+    assert.equal(f.replies.length, 1);
+  } finally { await f.cleanup(); }
+});
+
+test("catch-up and upload retries after restart do not duplicate completed progress notices", async () => {
+  const f = await fixture();
+  try {
+    f.captureError = new TypeError("fetch failed");
+    await f.accept(); await f.drain();
+    assert.equal(f.notices.length, 2);
+    f.captureError = null; f.now += 60000;
+    await f.reopen();
+    await f.worker.handleMessage(f.messages.values().next().value);
+    await f.drain();
+    assert.equal(f.downloads.length, 1);
+    assert.equal(f.captures.length, 2);
+    assert.equal(f.notices.length, 2);
+  } finally { await f.cleanup(); }
+});
+
+
+test("progress replies use the configured English language", async () => {
+  const f = await fixture("en");
+  try {
+    await f.accept(); await f.drain();
+    assert.deepEqual(f.notices.map((n) => n.content), ["Image received. Starting the download.", "Image downloaded and saved by the bot. Checking the results."]);
+  } finally { await f.cleanup(); }
+});
+
+test("existing capture databases acquire notice fields without losing durable image bytes", async () => {
+  const f = await fixture();
+  try {
+    await f.accept(); await f.drain();
+    const job = f.store.db.prepare("SELECT * FROM discord_jobs").get();
+    f.store.db.exec("ALTER TABLE discord_attachment_captures DROP COLUMN downloading_notice_at; ALTER TABLE discord_attachment_captures DROP COLUMN downloaded_notice_at");
+    await f.reopen();
+    assert.equal(f.store.readCapturePhoto(job).bytes, 3);
+    assert.equal(f.store.getCapture(job).stage, "ready");
+    assert.equal(f.store.getCapture(job).downloading_notice_at, null);
+    assert.equal(f.store.getCapture(job).downloaded_notice_at, null);
+  } finally { await f.cleanup(); }
+});
+
+test("a notice delivered before a crash is recovered from Discord without sending it twice", async () => {
+  const f = await fixture();
+  try {
+    const message = await f.accept(); await f.drain();
+    const delivered = f.notices.find((n) => n.phase === "downloaded");
+    const job = f.store.db.prepare("SELECT * FROM discord_jobs").get();
+    f.store.db.exec("UPDATE discord_attachment_captures SET downloaded_notice_at=NULL");
+    await f.reopen();
+    f.channel.messages.fetch = async (options) => options.message ? message : new Map([["notice", { ...delivered, author: f.client.user, reference: { messageId: message.id } }]]);
+    f.worker.queueCaptureNotice(job, "downloaded"); await f.drain();
+    assert.equal(f.notices.length, 2);
+    assert.equal(f.store.getCapture(job).downloaded_notice_at, f.now);
   } finally { await f.cleanup(); }
 });
