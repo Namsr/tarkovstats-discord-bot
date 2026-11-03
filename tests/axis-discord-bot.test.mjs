@@ -7,8 +7,10 @@ import test from "node:test";
 import { loadDiscordBotConfig } from "../lib/discord-bot/config.mjs";
 import { DiscordJobStore } from "../lib/discord-bot/state.mjs";
 import { DiscordBotWorker } from "../lib/discord-bot/worker.mjs";
-import { downloadAttachment, isAllowedMessage, MAX_BYTES, resolveMatchNumber, validateAttachmentUrl } from "../lib/discord-bot/security.mjs";
+import { downloadAttachment, isAllowedMessage, isImageAttachment, MAX_BYTES, resolveMatchNumber, validateAttachmentUrl } from "../lib/discord-bot/security.mjs";
 import { messageText, resultMessage } from "../lib/discord-bot/messages.mjs";
+
+const PNG_BYTES = Buffer.from("89504e470d0a1a0a", "hex");
 
 const ENV = {
   DISCORD_TOKEN: "A".repeat(60), AXIS_DISCORD_SECRET: "S".repeat(40), AXIS_DISCORD_GUILD_ID: "100000000000000001",
@@ -177,11 +179,47 @@ test("attachment URLs are restricted to Discord CDN and source channel", () => {
   assert.equal(url.hostname, "cdn.discordapp.com");
 });
 
+test("only PNG and JPEG attachments pass the filename and declared type filter", () => {
+  const attachment = { id: "300000000000000001", name: "result.png", contentType: "image/png" };
+  for (const [name, contentType] of [["result.PNG", "image/png"], ["result.jpg", "image/jpeg"], ["result.JPEG", "image/jpeg; charset=binary"], ["result.png", null]]) {
+    assert.equal(isImageAttachment({ ...attachment, name, contentType }), true, name);
+  }
+  for (const [name, contentType] of [["result.webp", "image/webp"], ["result.png", "image/webp"], ["result.gif", "image/png"], ["result.png.exe", "image/png"], ["result.jpg", "text/plain"]]) {
+    assert.equal(isImageAttachment({ ...attachment, name, contentType }), false, `${name}: ${contentType}`);
+  }
+  assert.equal(isImageAttachment({ ...attachment, name: null, contentType: null,
+    url: "https://cdn.discordapp.com/attachments/200000000000000001/300000000000000001/result.jpeg?sig=1" }), true);
+});
+
+test("download rejects unsupported attachments before making a CDN request", async () => {
+  let requests = 0;
+  await assert.rejects(() => downloadAttachment({ id: "300000000000000001", name: "result.png", contentType: "image/webp",
+    url: "https://cdn.discordapp.com/attachments/200000000000000001/300000000000000001/result.png" },
+    ["200000000000000001"], async () => { requests++; }), /unsupported_attachment/);
+  assert.equal(requests, 0);
+});
+
+test("download checks PNG and JPEG signatures instead of trusting the extension or response type", async () => {
+  const attachment = { id: "300000000000000001", name: "result.png", contentType: "image/png",
+    url: "https://cdn.discordapp.com/attachments/200000000000000001/300000000000000001/result.png" };
+  for (const [bytes, type] of [[Buffer.from("89504e470d0a1a0a", "hex"), "image/png"], [Buffer.from("ffd8ffe00010", "hex"), "image/jpeg"]]) {
+    const photo = await downloadAttachment({ ...attachment, name: type === "image/png" ? "result.png" : "result.jpeg", contentType: type },
+      ["200000000000000001"], async () => new Response(bytes));
+    assert.equal(photo.contentType, type, "missing MIME type is inferred from the bytes");
+  }
+  for (const bytes of [Buffer.from("RIFF0000WEBP"), Buffer.from("GIF89a"), Buffer.from("<html>error</html>"), Buffer.from([137, 80])]) {
+    await assert.rejects(() => downloadAttachment(attachment, ["200000000000000001"], async () =>
+      new Response(bytes, { headers: { "content-type": "image/png" } })), /unsupported_attachment/);
+  }
+  await assert.rejects(() => downloadAttachment(attachment, ["200000000000000001"], async () =>
+    new Response(Buffer.from("RIFF0000WEBP"), { headers: { "content-type": "image/webp" } })), /unsupported_attachment/);
+});
+
 test("download bounds image body and rejects redirects", async () => {
   const attachment = { id: "300000000000000001", name: "result.png", contentType: "image/png", url: "https://cdn.discordapp.com/attachments/200000000000000001/300000000000000001/a.png?x=1" };
-  const smallFetch = async () => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } });
+  const smallFetch = async () => new Response(PNG_BYTES, { headers: { "content-type": "image/png" } });
   const result = await downloadAttachment(attachment, ["200000000000000001"], smallFetch);
-  assert.equal(result.data, "AQID");
+  assert.equal(result.data, PNG_BYTES.toString("base64"));
   const badFetch = async () => new Response(null, { status: 302, headers: { location: "https://example.com" } });
   await assert.rejects(() => downloadAttachment(attachment, ["200000000000000001"], badFetch), /attachment_http_302/);
 });
@@ -273,7 +311,7 @@ test("worker sends two progress notices and exactly one final result", async () 
     const apiFetch = async (url, options) => {
       if (options?.body && JSON.parse(options.body).captureOnly) return capturedResponse();
       if (String(url).includes("/api/integrations/")) return new Response(JSON.stringify({ ok: true, matchNumber: 42, recognizedPlayers: 8, totalPlayers: 10, coveragePercent: 80, confidencePercent: 91, needsReview: false }), { status: 200, headers: { "content-type": "application/json" } });
-      return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } });
+      return new Response(PNG_BYTES, { headers: { "content-type": "image/png" } });
     };
     store = new DiscordJobStore(config.statePath);
     const worker = new DiscordBotWorker({ config, client, store, fetchImpl: apiFetch });
@@ -456,7 +494,7 @@ test("distinct multi-image replies are not suppressed by history entries without
         return new Response(JSON.stringify({ ok: true, matchNumber: 42, recognizedPlayers: complete ? 10 : 8, totalPlayers: 10,
           coveragePercent: complete ? 100 : 80, confidencePercent: 91, needsReview: false }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } });
+      return new Response(PNG_BYTES, { headers: { "content-type": "image/png" } });
     };
     store = new DiscordJobStore(config.statePath);
     const worker = new DiscordBotWorker({ config, client, store, fetchImpl: apiFetch });
@@ -603,7 +641,7 @@ test("a Discord permission error retries without saving a failure and succeeds a
         apiCalls += 1;
         return new Response(JSON.stringify({ ok: true, matchNumber: 42, recognizedPlayers: 10, totalPlayers: 10, coveragePercent: 100, confidencePercent: 95, needsReview: false }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } });
+      return new Response(PNG_BYTES, { headers: { "content-type": "image/png" } });
     };
     store = new DiscordJobStore(config.statePath);
     store.enqueue(job);
