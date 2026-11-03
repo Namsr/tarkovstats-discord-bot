@@ -10,6 +10,8 @@ import { MAX_BYTES } from "../lib/discord-bot/security.mjs";
 import { DiscordBotWorker } from "../lib/discord-bot/worker.mjs";
 import { messageText } from "../lib/discord-bot/messages.mjs";
 
+const PNG_BYTES = Buffer.from("89504e470d0a1a0a", "hex");
+
 async function fixture(language = "ru") {
   const directory = await mkdtemp(join(tmpdir(), "attachment-capture-"));
   const config = loadDiscordBotConfig({ DISCORD_TOKEN: "T".repeat(60), AXIS_DISCORD_SECRET: "S".repeat(40),
@@ -43,7 +45,7 @@ async function fixture(language = "ru") {
     if (String(url).startsWith("https://cdn.discordapp.com/")) {
       f.events.push("download"); f.downloads.push(String(url));
       if (f.downloadGate) await f.downloadGate.promise;
-      return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "image/png" } });
+      return new Response(PNG_BYTES, { headers: { "content-type": "image/png" } });
     }
     const body = JSON.parse(options.body);
     if (body.captureOnly) {
@@ -69,6 +71,22 @@ async function fixture(language = "ru") {
   f.cleanup = async () => { for (const gate of f.gates) gate.resolve(); await f.worker.stop(); f.store.close(); await rm(directory, { recursive: true, force: true }); };
   return f;
 }
+
+test("Gateway ignores WebP and other unsupported attachments before enqueue, notices or CDN access", async () => {
+  const f = await fixture();
+  try {
+    for (const [name, contentType] of [["image.png", "image/webp"], ["image.webp", "image/webp"], ["image.gif", "image/gif"]]) {
+      const message = f.message();
+      Object.assign([...message.attachments.values()][0], { name, contentType });
+      assert.equal(await f.worker.handleMessage(message), 0);
+    }
+    await f.drain();
+    assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM discord_jobs").get().n, 0);
+    assert.equal(f.downloads.length, 0);
+    assert.equal(f.notices.length, 0);
+    assert.equal(f.captures.length, 0);
+  } finally { await f.cleanup(); }
+});
 
 test("Gateway downloads start before Discord REST, independently of a blocked OCR job", async () => {
   const f = await fixture();
@@ -178,7 +196,7 @@ test("a lost capture response retries the same durable bytes instead of download
     await f.accept(); await f.drain();
     const saved = f.store.db.prepare("SELECT stage,length(data) AS n FROM discord_attachment_captures").get();
     assert.equal(saved.stage, "downloaded");
-    assert.equal(saved.n, 3);
+    assert.equal(saved.n, PNG_BYTES.length);
     f.captureError = null;
     f.now += 60000;
     await f.reopen(); f.worker.kickCaptures(); await f.drain();
@@ -194,7 +212,7 @@ test("an old backend response cannot unlock OCR and retained bytes can be upload
     f.captureResponse = { ok: true, matchNumber: 5892, recognizedPlayers: 8, totalPlayers: 10, coveragePercent: 80 };
     await f.accept(); await f.drain();
     assert.equal(f.store.claimDue(f.now), null);
-    assert.equal(f.store.db.prepare("SELECT stage,length(data) AS n FROM discord_attachment_captures").get().n, 3);
+    assert.equal(f.store.db.prepare("SELECT stage,length(data) AS n FROM discord_attachment_captures").get().n, PNG_BYTES.length);
     f.captureResponse = null; f.now += 60000;
     f.worker.kickCaptures(); await f.drain();
     assert.ok(f.store.claimDue(f.now));
@@ -307,7 +325,7 @@ test("other rejection types do not delete the last local copy", async () => {
     await f.accept(); await f.drain();
     const job = f.store.claimDue(f.now);
     assert.ok(job);
-    assert.equal(f.store.readCapturePhoto(job).bytes, 3);
+    assert.equal(f.store.readCapturePhoto(job).bytes, PNG_BYTES.length);
     assert.equal(f.ocr.length, 0);
   } finally { await f.cleanup(); }
 });
@@ -339,7 +357,7 @@ test("two ordered progress replies bracket the durable download and precede the 
     assert.equal(f.store.getCapture(job).downloaded_notice_at, null);
     f.downloadGate.resolve(); await f.drain();
     assert.deepEqual(f.notices.map((n) => n.phase), ["downloading", "downloaded"]);
-    assert.equal(f.store.readCapturePhoto(job).bytes, 3);
+    assert.equal(f.store.readCapturePhoto(job).bytes, PNG_BYTES.length);
     assert.equal(f.store.getCapture(job).downloaded_notice_at, f.now);
     assert.equal(f.ocr.length, 0);
     assert.equal(f.replies.length, 0);
@@ -379,7 +397,7 @@ test("progress failures preserve captured bytes and do not become download retri
     assert.equal(f.downloads.length, 1);
     assert.equal(f.captures.length, 1);
     const job = f.store.claimDue(f.now);
-    assert.equal(f.store.readCapturePhoto(job).bytes, 3);
+    assert.equal(f.store.readCapturePhoto(job).bytes, PNG_BYTES.length);
     f.noticeError = null;
     await f.worker.processJob(job);
     assert.equal(f.ocr.length, 1);
@@ -419,7 +437,7 @@ test("existing capture databases acquire notice fields without losing durable im
     const job = f.store.db.prepare("SELECT * FROM discord_jobs").get();
     f.store.db.exec("ALTER TABLE discord_attachment_captures DROP COLUMN downloading_notice_at; ALTER TABLE discord_attachment_captures DROP COLUMN downloaded_notice_at");
     await f.reopen();
-    assert.equal(f.store.readCapturePhoto(job).bytes, 3);
+    assert.equal(f.store.readCapturePhoto(job).bytes, PNG_BYTES.length);
     assert.equal(f.store.getCapture(job).stage, "ready");
     assert.equal(f.store.getCapture(job).downloading_notice_at, null);
     assert.equal(f.store.getCapture(job).downloaded_notice_at, null);
